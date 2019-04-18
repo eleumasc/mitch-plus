@@ -1,7 +1,7 @@
 {
-  "name": "web-crawler",
-  "version": "1.0.0",
-  "description": "",
+  "name": "mitch-plus",
+  "version": "0.1.0",
+  "description": "Web crawler for the automated black-box detection of CSRF vulnerabilities",
   "main": "index.js",
   "dependencies": {
     "puppeteer": "^1.14.0"
@@ -12,12 +12,12 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/eleumasc/web-crawler.git"
+    "url": "git+https://github.com/eleumasc/mitch-plus.git"
   },
   "author": "Samuele Casarin",
   "license": "MIT",
   "bugs": {
-    "url": "https://github.com/eleumasc/web-crawler/issues"
+    "url": "https://github.com/eleumasc/mitch-plus/issues"
   },
-  "homepage": "https://github.com/eleumasc/web-crawler#readme"
+  "homepage": "https://github.com/eleumasc/mitch-plus#readme"
 }
