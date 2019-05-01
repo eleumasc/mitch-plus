@@ -4,7 +4,10 @@
   "description": "Web crawler for the automated black-box detection of CSRF vulnerabilities",
   "main": "index.js",
   "dependencies": {
-    "puppeteer": "^1.14.0"
+    "dotenv": "^7.0.0",
+    "get-port": "^5.0.0",
+    "puppeteer-firefox": "^0.5.0",
+    "web-ext": "denar90/web-ext#build-args-feature"
   },
   "devDependencies": {},
   "scripts": {
