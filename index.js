@@ -1,10 +1,13 @@
+"use strict";
+
 require("dotenv").config();
 const getPort = require("get-port");
 const pptrFirefox = require("puppeteer-firefox");
 const webExt = require("web-ext").default;
 const util = require("util");
 
-// const apt = require("./apt");
+const same = require("./same");
+const crawler = require("./crawler");
 
 const config = {
   sites: [
@@ -38,6 +41,7 @@ const config = {
       },
       navigation: {
         homePageUrl: "https://madales.altervista.org/arhunt/public/home",
+        includeDomains: [],
         excludeUrls: [
           "https://madales.altervista.org/arhunt/public/signin",
           "https://madales.altervista.org/arhunt/public/signout"
@@ -110,7 +114,7 @@ const config = {
   await queryMitch(page, "logged_out_Alice2");
   console.log("logged_out_Alice2");
 
-  console.log("We're in phase " + (await queryMitch(page, "phase")));
+  console.log("SUCCESS");
   console.log(
     "Collected sensitive requests: " +
       (await queryMitch(page, "collected_sensitive_requests"))
@@ -129,91 +133,40 @@ const config = {
   await browser.close();
 })();
 
-function sameURL(urlString1, urlString2) {
-  const url1 = new URL(urlString1),
-    url2 = new URL(urlString2);
-  return (
-    url1.protocol === url2.protocol &&
-    url1.host === url2.host &&
-    url1.pathname === url2.pathname &&
-    Array.from(url1.searchParams.entries()).every(
-      ([key, value]) =>
-        url2.searchParams.has(key) && url2.searchParams.get(key) === value
-    )
-  );
-}
-
+// TODO: give-up counter for unreachable links
 async function navigate(page, site) {
-  let ttl = 50; // FIXME: this navigation strategy will be deprecated (the navigation will terminate when every link will be visited)
-  const history = [];
-
-  // const abstractPageTree = apt.initAbstractPageTree();
-
-  await page.goto(site.navigation.homePageUrl);
-
-  while (ttl-- > 0) {
-    const [links, linkElementsHandle] = await findLinksInPage(page);
-
-    /*
-    const pageModel = apt.calcPageModel(links);
-    const pageLinkVector = apt.calcPageLinkVector(pageModel);
-    const pageNode = apt.storePageLinkVectorInAbstractPageTree(
-      abstractPageTree,
-      pageLinkVector
-    ); */
-
-    const locationHref = await page.evaluate(() => {
-      return window.location.href;
-    });
-    console.log("[VISIT] " + locationHref);
-
-    let historyItem = history.find(historyItem =>
-      sameURL(locationHref, historyItem.url)
+  const crawl = crawler.create();
+  do {
+    const [links, linkElementsHandle] = await filterLinks(
+      page,
+      await findLinksInPage(page),
+      linkIsAllowed,
+      {
+        site: async () => site,
+        location: async () => await page.evaluate(() => window.location.href)
+      }
     );
-    if (!historyItem) {
-      historyItem = {
-        url: locationHref,
-        visitCount: 0,
-        allLinksVisited: false
-      };
-      history.push(historyItem);
-    }
-    historyItem.visitCount++;
 
-    let selectedLink = undefined;
-    if (!historyItem.allLinksVisited) {
-      selectedLink = links.find(
-        link =>
-          !site.navigation.excludeUrls.some(url => sameURL(link.url, url)) &&
-          !history.some(historyItem => sameURL(link.url, historyItem.url))
+    const link = crawler.selectNextLink(crawl, links);
+    if (!!link) {
+      const linkElementHandle = await getLinkElementHandle(
+        page,
+        link,
+        links,
+        linkElementsHandle
       );
-    }
-    if (!selectedLink) {
-      historyItem.allLinksVisited = true;
-      selectedLink = links.find(
-        link =>
-          !site.navigation.excludeUrls.some(url => sameURL(link.url, url)) &&
-          history.some(
-            historyItem =>
-              !historyItem.allLinksVisited && sameURL(link.url, historyItem.url)
-          )
-      );
-    }
-
-    if (!!selectedLink) {
-      const selectedLinkIndex = links.indexOf(selectedLink);
-      console.log("[LINK] " + util.inspect(selectedLink));
-      await visitLinkInPage(page, links, linkElementsHandle, selectedLinkIndex);
+      await visitLinkInPage(page, link, linkElementHandle);
     } else {
       await page.goto(site.navigation.homePageUrl);
     }
-  }
+  } while (crawler.thereAreUnvisitedLinks(crawl));
 }
 
 async function findLinksInPage(page) {
   const linkElementsHandle = await page.evaluateHandle(() => {
-    return document.querySelectorAll("a, form");
+    return Array.from(document.querySelectorAll("a, form"));
   });
+
   const links = await page.evaluate(linkElements => {
     const links = [];
 
@@ -224,14 +177,6 @@ async function findLinksInPage(page) {
         (isForm ? linkElement.action : linkElement.href) || location.href;
 
       const linkUrl = new URL(linkUrlString);
-
-      // Ignore links to external sites...
-      if (
-        linkUrl.protocol !== location.protocol ||
-        linkUrl.host !== location.host
-      ) {
-        continue;
-      }
 
       const link = {};
 
@@ -266,27 +211,99 @@ async function findLinksInPage(page) {
 
     return links;
   }, linkElementsHandle);
+
   return [links, linkElementsHandle];
 }
 
-async function visitLinkInPage(page, links, linkElementsHandle, linkIndex) {
-  const link = links[linkIndex];
-  const linkElement = await page.evaluateHandle(
-    (_linkElements, _linkIndex) => _linkElements[_linkIndex],
+function linkIsAllowed(link, args) {
+  return (
+    !args.site.navigation.excludeUrls.some(url => same.url(link.url, url)) &&
+    (args.site.navigation.includeDomains.some(url =>
+      same.domain(link.url, url)
+    ) ||
+      same.domain(link.url, args.location))
+  );
+}
+
+async function filterLinks(
+  page,
+  [links, linkElementsHandle],
+  filterFn,
+  argsFns
+) {
+  const args = {};
+  for (let key in argsFns) {
+    if (argsFns.hasOwnProperty(key)) {
+      args[key] = await argsFns[key]();
+    }
+  }
+
+  const filteredLinks = [];
+  const filteredIndexes = [];
+  for (let i = 0; i < links.length; i++) {
+    if (filterFn(links[i], args)) {
+      filteredLinks.push(links[i]);
+      filteredIndexes.push(true);
+    } else {
+      filteredIndexes.push(false);
+    }
+  }
+
+  const filteredLinkElementsHandle = await page.evaluateHandle(
+    (linkElements, filteredIndexes) => {
+      return linkElements.filter((_, i) => filteredIndexes[i]);
+    },
     linkElementsHandle,
-    linkIndex
+    filteredIndexes
   );
 
+  return [filteredLinks, filteredLinkElementsHandle];
+}
+
+async function getLinkElementHandle(page, link, links, linkElementsHandle) {
+  const index = links.indexOf(link);
+  if (index >= 0) {
+    return await page.evaluateHandle(
+      (linkElements, index) => linkElements[index],
+      linkElementsHandle,
+      index
+    );
+  }
+}
+
+async function visitLinkInPage(page, link, linkElementHandle) {
+  // TODO: smarter strategy
+
   if (link.type === "FORM") {
-    await linkElement.submit();
+    // fillForm(page, linkElementHandle);
+    await Promise.race([
+      page.evaluate(formElement => {
+        formElement.submit();
+      }, linkElementHandle),
+      page.waitForNavigation({ timeout: 10000, waitUntil: "load" })
+    ]);
   } else {
     try {
-      await linkElement.click();
+      await linkElementHandle.click();
+      try {
+        await page.waitForNavigation({ timeout: 10000, waitUntil: "load" });
+      } catch (e) {}
     } catch (e) {
+      console.error("goto");
       await page.goto(link.url);
     }
   }
-  await page.waitForNavigation({ waitUntil: "load" }); // FIXME: some link could not trigger a navigation
+}
+
+async function fillForm(page, formElementHandle) {
+  // TODO: smarter strategy
+  /*
+  await page.evaluate(formElement => {
+    const fieldElements = formElement.querySelectorAll(
+      "input, textarea, select"
+    );
+    // ...
+  }, formElementHandle); */
 }
 
 async function queryMitch(page, requestType, requestData = null) {

@@ -1,119 +1,72 @@
-function treeCreateNode(nodeInfo) {
-  return Object.defineProperty(
-    {
-      info: nodeInfo,
-      children: []
-    },
-    "parent",
-    {
-      enumerable: false,
-      value: null
-    }
-  );
+"use strict";
+
+const same = require("./same");
+
+function treeNode(info, parent = null) {
+  return {
+    info: info,
+    parent: parent,
+    children: []
+  };
 }
 
-function treeFindOrPushChild(parent, findFn, childInfoFn) {
-  let child = parent.children.find(findFn);
+function treeFindOrPushChild(parent, findChildFn, pushChildInfoFn) {
+  let child = parent.children.find(findChildFn);
   if (!child) {
-    child = treeCreateNode(childInfoFn());
-    child.parent = parent;
+    child = treeNode(pushChildInfoFn(), parent);
     parent.children.push(child);
   }
   return child;
 }
 
-function sameDompath(d1, d2) {
-  return d1.length === d2.length && d1.every((_, i) => d1[i] === d2[i]);
-}
-
-function sameActionElement(ae1, ae2) {
-  return ae1 === ae2;
-}
-
-function sameParamsKeys(pks1, pks2) {
-  return pks1.length === pks2.length && pks1.every(pk1 => pks2.includes(pk1));
-}
-
-function sameParams(ps1, ps2) {
-  for (key in ps1) {
-    if (
-      ps1.hasOwnProperty(key) &&
-      !(ps2.hasOwnProperty(key) && ps1[key] === ps2[key])
-    ) {
-      return false;
-    }
-  }
-  for (key in ps2) {
-    if (ps2.hasOwnProperty(key) && !ps1.hasOwnProperty(key)) {
-      return false;
-    }
-  }
-  return true;
-}
-
 function calcPageModel(links) {
-  const pageModel = treeCreateNode(
-    Object.defineProperty({ kind: "pmRoot" }, "links", {
-      enumerable: false,
-      value: links
-    })
-  );
+  const pageModel = treeNode({ kind: "pm" });
+
   for (let link of links) {
     let lastNode = pageModel;
     lastNode = treeFindOrPushChild(
       lastNode,
       child =>
-        child.info.kind === "dompath" &&
-        sameDompath(link.dompath, child.info.dompath),
-      () => ({
-        kind: "dompath",
-        dompath: link.dompath
-      })
+        child.info.kind === "pm.dompath" &&
+        same.dompath(link.dompath, child.info.dompath),
+      () => ({ kind: "pm.dompath", dompath: link.dompath })
     );
+
     let actionElementIndex = 0;
     for (let actionElement of link.action) {
       lastNode = treeFindOrPushChild(
         lastNode,
         child =>
-          child.info.kind === "actionElement" &&
-          sameActionElement(actionElement, child.info.actionElement),
+          child.info.kind === "pm.actionElement" &&
+          child.info.index === actionElementIndex &&
+          same.actionElement(actionElement, child.info.actionElement),
         () => ({
-          kind: "actionElement",
-          actionElementIndex: actionElementIndex++,
+          kind: "pm.actionElement",
+          index: actionElementIndex,
           actionElement: actionElement
         })
       );
+      actionElementIndex++;
     }
+
     const linkParamsKeys = Object.keys(link.params);
     lastNode = treeFindOrPushChild(
       lastNode,
       child =>
-        child.info.kind === "paramsKeys" &&
-        sameParamsKeys(linkParamsKeys, child.info.paramsKeys),
-      () => ({
-        kind: "paramsKeys",
-        paramsKeys: linkParamsKeys
-      })
+        child.info.kind === "pm.paramsKeys" &&
+        same.paramsKeys(linkParamsKeys, child.info.paramsKeys),
+      () => ({ kind: "pm.paramsKeys", paramsKeys: linkParamsKeys })
     );
+
     lastNode = treeFindOrPushChild(
       lastNode,
       child =>
-        child.info.kind === "params" &&
-        sameParams(link.params, child.info.params),
-      () =>
-        Object.defineProperty(
-          {
-            kind: "params",
-            params: link.params
-          },
-          "link",
-          {
-            enumerable: false,
-            value: link
-          }
-        )
+        child.info.kind === "pm.params" &&
+        same.params(link.params, child.info.params),
+      () => ({ kind: "pm.params", params: link.params })
     );
   }
+
   return pageModel;
 }
 
@@ -124,49 +77,48 @@ function calcPageLinkVector(pageModel) {
     paramsKeysCollection: [],
     paramsCollection: []
   };
+
   const bfsQueue = [pageModel.children];
+
   while (bfsQueue.length > 0) {
     let nodes = bfsQueue.shift();
+
     for (let node of nodes) {
       bfsQueue.push(node.children);
-      if (node.info.kind === "dompath") {
+      if (node.info.kind === "pm.dompath") {
         if (
           !pageLinkVector.dompathCollection.some(dompath =>
-            sameDompath(node.info.dompath, dompath)
+            same.dompath(node.info.dompath, dompath)
           )
         ) {
           pageLinkVector.dompathCollection.push(node.info.dompath);
         }
-      } else if (node.info.kind === "actionElement") {
-        if (
-          node.info.actionElementIndex ==
-          pageLinkVector.actionElementCollections.length
-        ) {
+      } else if (node.info.kind === "pm.actionElement") {
+        if (node.info.index == pageLinkVector.actionElementCollections.length) {
           pageLinkVector.actionElementCollections.push([]);
         }
         if (
-          !pageLinkVector.actionElementCollections[
-            node.info.actionElementIndex
-          ].some(actionElement =>
-            sameActionElement(node.info.actionElement, actionElement)
+          !pageLinkVector.actionElementCollections[node.info.index].some(
+            actionElement =>
+              same.actionElement(node.info.actionElement, actionElement)
           )
         ) {
-          pageLinkVector.actionElementCollections[
-            node.info.actionElementIndex
-          ].push(node.info.actionElement);
+          pageLinkVector.actionElementCollections[node.info.index].push(
+            node.info.actionElement
+          );
         }
-      } else if (node.info.kind === "paramsKeys") {
+      } else if (node.info.kind === "pm.paramsKeys") {
         if (
           !pageLinkVector.paramsKeysCollection.some(paramsKeys =>
-            sameParamsKeys(node.info.paramsKeys, paramsKeys)
+            same.paramsKeys(node.info.paramsKeys, paramsKeys)
           )
         ) {
           pageLinkVector.paramsKeysCollection.push(node.info.paramsKeys);
         }
-      } else if (node.info.kind === "params") {
+      } else if (node.info.kind === "pm.params") {
         if (
           !pageLinkVector.paramsCollection.some(params =>
-            sameParams(node.info.params, params)
+            same.params(node.info.params, params)
           )
         ) {
           pageLinkVector.paramsCollection.push(node.info.params);
@@ -176,97 +128,85 @@ function calcPageLinkVector(pageModel) {
       }
     }
   }
+
   return pageLinkVector;
 }
 
-function initAbstractPageTree() {
-  return treeCreateNode({
-    kind: "aptRoot"
-  });
-}
+exports.create = function() {
+  return treeNode({ kind: "apt" });
+};
 
-function sameCollection(c1, c2, sameFn) {
-  return c1.length === c2.length && c1.every(a => c2.some(b => sameFn(a, b)));
-}
+exports.grow = function(absPageTree, links) {
+  const pageModel = calcPageModel(links);
+  const pageLinkVector = calcPageLinkVector(pageModel);
 
-function storePageLinkVectorInAbstractPageTree(
-  abstractPageTree,
-  pageLinkVector
-) {
-  let lastNode = abstractPageTree;
+  let lastNode = absPageTree;
+
   lastNode = treeFindOrPushChild(
     lastNode,
     child =>
-      child.info.kind === "dompathCollection" &&
-      sameCollection(
+      child.info.kind === "apt.dompathCollection" &&
+      same.collection(
         pageLinkVector.dompathCollection,
         child.info.dompathCollection,
-        sameDompath
+        same.dompath
       ),
     () => ({
-      kind: "dompathCollection",
+      kind: "apt.dompathCollection",
       dompathCollection: pageLinkVector.dompathCollection
     })
   );
+
   let actionElementCollectionIndex = 0;
   for (let actionElementCollection of pageLinkVector.actionElementCollections) {
     lastNode = treeFindOrPushChild(
       lastNode,
       child =>
-        child.info.kind === "actionElementCollection" &&
-        sameCollection(
+        child.info.kind === "apt.actionElementCollection" &&
+        child.info.index === actionElementCollectionIndex &&
+        same.collection(
           actionElementCollection,
           child.info.actionElementCollection,
-          sameActionElement
+          same.actionElement
         ),
       () => ({
-        kind: "actionElementCollection",
-        actionElementCollectionIndex: actionElementCollectionIndex++,
+        kind: "apt.actionElementCollection",
+        index: actionElementCollectionIndex,
         actionElementCollection: actionElementCollection
       })
     );
+    actionElementCollectionIndex++;
   }
+
   lastNode = treeFindOrPushChild(
     lastNode,
     child =>
-      child.info.kind === "paramsKeysCollection" &&
-      sameCollection(
+      child.info.kind === "apt.paramsKeysCollection" &&
+      same.collection(
         pageLinkVector.paramsKeysCollection,
         child.info.paramsKeysCollection,
-        sameParamsKeys
+        same.paramsKeys
       ),
     () => ({
-      kind: "paramsKeysCollection",
+      kind: "apt.paramsKeysCollection",
       paramsKeysCollection: pageLinkVector.paramsKeysCollection
     })
   );
+
   lastNode = treeFindOrPushChild(
     lastNode,
     child =>
-      child.info.kind === "paramsCollection" &&
-      sameCollection(
+      child.info.kind === "apt.paramsCollection" &&
+      same.collection(
         pageLinkVector.paramsCollection,
         child.info.paramsCollection,
-        sameParams
+        same.params
       ),
     () => ({
-      kind: "paramsCollection",
+      kind: "apt.paramsCollection",
       paramsCollection: pageLinkVector.paramsCollection
     })
   );
-  return lastNode; // Returns the node that refers to the page (which is the last one)
-}
 
-module.exports = {
-  treeCreateNode: treeCreateNode,
-  treeFindOrPushChild: treeFindOrPushChild,
-  sameDompath: sameDompath,
-  sameActionElement: sameActionElement,
-  sameParamsKeys: sameParamsKeys,
-  sameParams: sameParams,
-  calcPageModel: calcPageModel,
-  calcPageLinkVector: calcPageLinkVector,
-  initAbstractPageTree: initAbstractPageTree,
-  sameCollection: sameCollection,
-  storePageLinkVectorInAbstractPageTree: storePageLinkVectorInAbstractPageTree
+  return lastNode;
 };
