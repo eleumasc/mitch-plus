@@ -37,7 +37,7 @@ exports.paramsKeys = function(pks1, pks2) {
 };
 
 exports.params = function(ps1, ps2) {
-  for (key in ps1) {
+  for (let key in ps1) {
     if (
       ps1.hasOwnProperty(key) &&
       !(ps2.hasOwnProperty(key) && ps1[key] === ps2[key])
@@ -45,7 +45,7 @@ exports.params = function(ps1, ps2) {
       return false;
     }
   }
-  for (key in ps2) {
+  for (let key in ps2) {
     if (ps2.hasOwnProperty(key) && !ps1.hasOwnProperty(key)) {
       return false;
     }
