@@ -47,6 +47,71 @@ const config = {
           "https://madales.altervista.org/arhunt/public/signout"
         ]
       }
+    },
+    {
+      baseUrl: "http://172.18.0.1:8080/",
+      auth: {
+        login: async (page, profile) => {
+          await page.goto("http://172.18.0.1:8080/login/index.php");
+          await page.type("#username", profile.userid);
+          await page.type("#password", profile.password);
+          await page.click("#loginbtn");
+          try {
+            await page.waitForNavigation({ timeout: 7500, waitUntil: "load" });
+          } catch {}
+        },
+        logout: async page => {
+          await page.goto("http://172.18.0.1:8080/login/logout.php");
+        },
+        profiles: {
+          alice: {
+            userid: "alice",
+            password: "Passw0rd*"
+          },
+          bob: {
+            userid: "bob",
+            password: "Passw0rd*"
+          }
+        }
+      },
+      navigation: {
+        homePageUrl: "http://172.18.0.1:8080/my/",
+        includeDomains: [],
+        excludeUrls: []
+      }
+    },
+    {
+      baseUrl: "http://172.18.0.1:8080/",
+      auth: {
+        login: async (page, profile) => {
+          await page.goto("http://172.18.0.1:8080/index.php?action=login");
+          await page.type('#frmLogin input[name="user"]', profile.userid);
+          await page.type('#frmLogin input[name="passwrd"]', profile.password);
+          await page.click('#frmLogin input[type="submit"]');
+          try {
+            await page.waitForNavigation({ timeout: 7500, waitUntil: "load" });
+          } catch {}
+        },
+        logout: async page => {
+          await page.goto("http://172.18.0.1:8080/index.php");
+          await page.click("#button_logout a");
+        },
+        profiles: {
+          alice: {
+            userid: "alice",
+            password: "Passw0rd*"
+          },
+          bob: {
+            userid: "bob",
+            password: "Passw0rd*"
+          }
+        }
+      },
+      navigation: {
+        homePageUrl: "http://172.18.0.1:8080/index.php",
+        includeDomains: [],
+        excludeUrls: [url => url.indexOf("logout") !== -1]
+      }
     }
   ]
 };
@@ -77,10 +142,11 @@ const config = {
   );
   await page.setViewport({ width: 1024, height: 768 });
 
-  const site = config.sites[0];
+  const site = config.sites[2];
 
   await page.goto(site.baseUrl);
 
+  /*
   console.log("Looking for Mitch...");
   if ("Hello Mitch!" !== (await queryMitch(page, "echo", "Hello Mitch!"))) {
     console.error("Mitch is not available");
@@ -129,95 +195,126 @@ const config = {
       depth: null
     })
   );
+  /* */
+
+  await site.auth.login(page, site.auth.profiles.alice);
+  console.log("logged in");
+  await navigate(page, site);
+  await site.auth.logout(page);
 
   await browser.close();
 })();
 
-// TODO: give-up counter for unreachable links
 async function navigate(page, site) {
-  const crawl = crawler.create();
-  do {
-    const [links, linkElementsHandle] = await filterLinks(
-      page,
-      await findLinksInPage(page),
-      linkIsAllowed,
-      {
-        site: async () => site,
-        location: async () => await page.evaluate(() => window.location.href)
-      }
-    );
+  let linkArray, linkHandleArray;
+  return crawler.crawl(async req => {
+    if (req.request === "page") {
+      let attempts = 3;
+      while (attempts-- > 0) {
+        try {
+          [linkArray, linkHandleArray] = await filterLinks(
+            await findLinksInPage(page),
+            linkIsAllowed,
+            {
+              site: async () => site,
+              location: async () =>
+                await page.evaluate(() => window.location.href)
+            }
+          );
 
-    const link = crawler.selectNextLink(crawl, links);
-    if (!!link) {
-      const linkElementHandle = await getLinkElementHandle(
-        page,
-        link,
-        links,
-        linkElementsHandle
-      );
-      await visitLinkInPage(page, link, linkElementHandle);
-    } else {
+          return { reply: "page", links: linkArray };
+        } catch {}
+      }
+      return { reply: "terminate" };
+    } else if (req.request === "follow") {
+      try {
+        await visitLinkInPage(
+          page,
+          req.link,
+          linkHandleArray[linkArray.indexOf(req.link)]
+        );
+        return { reply: "done" };
+      } catch (err) {
+        console.error("[E]", err);
+        if (
+          err.message ===
+          "Protocol error (Runtime.callFunction): Session closed. Most likely the page has been closed."
+        ) {
+          return { reply: "terminate" };
+        } else if (err.name === "LinkNotVisitableError") {
+          return { reply: "skip" };
+        } else if (err.name === "FormNotFillableError") {
+          return { reply: "mark" };
+        } else {
+          throw err;
+        }
+      }
+    } else if (req.request === "home") {
       await page.goto(site.navigation.homePageUrl);
+      return { reply: "done" };
+    } else {
+      throw new Error("Protocol error");
     }
-  } while (crawler.thereAreUnvisitedLinks(crawl));
+  });
 }
 
 async function findLinksInPage(page) {
-  const linkElementsHandle = await page.evaluateHandle(() => {
-    return Array.from(document.querySelectorAll("a, form"));
-  });
+  const linkHandleArray = await page.$$("a, form");
 
-  const links = await page.evaluate(linkElements => {
-    const links = [];
+  const linkArray = await Promise.all(
+    linkHandleArray.map(linkHandle =>
+      page.evaluate(linkEl => {
+        const isForm = linkEl.tagName === "FORM";
 
-    for (let linkElement of linkElements) {
-      const isForm = linkElement.tagName === "FORM";
+        const linkUrlString =
+          (isForm ? linkEl.action : linkEl.href) || location.href;
 
-      const linkUrlString =
-        (isForm ? linkElement.action : linkElement.href) || location.href;
+        const linkUrl = new URL(linkUrlString);
 
-      const linkUrl = new URL(linkUrlString);
+        const link = {};
 
-      const link = {};
+        link.type = isForm ? "FORM" : "A";
+        link.method = isForm ? linkEl.method : "GET";
+        link.url = linkUrlString;
 
-      link.type = isForm ? "FORM" : "A";
-      link.method = isForm ? linkElement.method : "GET";
-      link.url = linkUrlString;
+        link.dompath = (e => {
+          const dompath = [];
+          while (e !== document.body) {
+            dompath.unshift(e.tagName);
+            e = e.parentElement;
+          }
+          return dompath;
+        })(linkEl);
 
-      link.dompath = (e => {
-        const dompath = [];
-        while (e !== document.body) {
-          dompath.unshift(e.tagName);
-          e = e.parentElement;
-        }
-        return dompath;
-      })(linkElement);
+        link.action = linkUrl.pathname.split("/").filter(s => s.trim() !== "");
 
-      link.action = linkUrl.pathname.split("/").filter(s => s.trim() !== "");
-
-      link.params = {};
-      linkUrl.searchParams.forEach((value, key) => {
-        link.params[key] = value;
-      });
-      if (isForm) {
-        const formData = new FormData(linkElement);
-        Array.from(formData.entries()).forEach(([key, value]) => {
+        link.params = {};
+        linkUrl.searchParams.forEach((value, key) => {
           link.params[key] = value;
         });
-      }
+        if (isForm) {
+          const formData = new FormData(linkEl);
+          Array.from(formData.entries()).forEach(([key, value]) => {
+            link.params[key] = value;
+          });
+        }
 
-      links.push(link);
-    }
+        return link;
+      }, linkHandle)
+    )
+  );
 
-    return links;
-  }, linkElementsHandle);
-
-  return [links, linkElementsHandle];
+  return [linkArray, linkHandleArray];
 }
 
 function linkIsAllowed(link, args) {
   return (
-    !args.site.navigation.excludeUrls.some(url => same.url(link.url, url)) &&
+    !args.site.navigation.excludeUrls.some(
+      urlOrPredicate =>
+        (typeof urlOrPredicate === "string" &&
+          same.url(link.url, urlOrPredicate)) ||
+        (typeof urlOrPredicate === "function" && urlOrPredicate(link.url))
+    ) &&
     (args.site.navigation.includeDomains.some(url =>
       same.domain(link.url, url)
     ) ||
@@ -225,12 +322,7 @@ function linkIsAllowed(link, args) {
   );
 }
 
-async function filterLinks(
-  page,
-  [links, linkElementsHandle],
-  filterFn,
-  argsFns
-) {
+async function filterLinks([linkArray, linkHandleArray], filterFn, argsFns) {
   const args = {};
   for (let key in argsFns) {
     if (argsFns.hasOwnProperty(key)) {
@@ -238,72 +330,98 @@ async function filterLinks(
     }
   }
 
-  const filteredLinks = [];
-  const filteredIndexes = [];
-  for (let i = 0; i < links.length; i++) {
-    if (filterFn(links[i], args)) {
-      filteredLinks.push(links[i]);
-      filteredIndexes.push(true);
+  const linkFilteredArray = [];
+  const filterMask = [];
+  for (let i = 0; i < linkArray.length; i++) {
+    if (filterFn(linkArray[i], args)) {
+      linkFilteredArray.push(linkArray[i]);
+      filterMask.push(true);
     } else {
-      filteredIndexes.push(false);
+      filterMask.push(false);
     }
   }
 
-  const filteredLinkElementsHandle = await page.evaluateHandle(
-    (linkElements, filteredIndexes) => {
-      return linkElements.filter((_, i) => filteredIndexes[i]);
-    },
-    linkElementsHandle,
-    filteredIndexes
+  const linkHandleFilteredArray = linkHandleArray.filter(
+    (_, i) => filterMask[i]
   );
 
-  return [filteredLinks, filteredLinkElementsHandle];
+  return [linkFilteredArray, linkHandleFilteredArray];
 }
 
-async function getLinkElementHandle(page, link, links, linkElementsHandle) {
-  const index = links.indexOf(link);
-  if (index >= 0) {
-    return await page.evaluateHandle(
-      (linkElements, index) => linkElements[index],
-      linkElementsHandle,
-      index
-    );
-  }
-}
+async function visitLinkInPage(page, link, linkHandle) {
+  const linkType = await page.evaluate(linkEl => linkEl.tagName, linkHandle);
 
-async function visitLinkInPage(page, link, linkElementHandle) {
-  // TODO: smarter strategy
+  if (linkType === "FORM") {
+    await fillForm(linkHandle);
 
-  if (link.type === "FORM") {
-    // fillForm(page, linkElementHandle);
-    await Promise.race([
-      page.evaluate(formElement => {
-        formElement.submit();
-      }, linkElementHandle),
-      page.waitForNavigation({ timeout: 10000, waitUntil: "load" })
-    ]);
-  } else {
     try {
-      await linkElementHandle.click();
+      await page.evaluate(formEl => {
+        formEl.submit();
+      }, linkHandle);
+    } catch (err) {
+      throw { name: "LinkNotVisitableError" };
+    }
+    try {
+      await page.waitForNavigation({
+        timeout: 7500,
+        waitUntil: "load"
+      });
+    } catch {}
+  } else {
+    const linkWithoutNavigation =
+      same.url(await page.url(), link.url) && link.url.indexOf("#") !== -1;
+
+    try {
+      await linkHandle.click();
+    } catch (err) {
+      throw { name: "LinkNotVisitableError", message: err.message };
+    }
+
+    if (!linkWithoutNavigation) {
       try {
-        await page.waitForNavigation({ timeout: 10000, waitUntil: "load" });
-      } catch (e) {}
-    } catch (e) {
-      console.error("goto");
-      await page.goto(link.url);
+        await page.waitForNavigation({
+          timeout: 7500,
+          waitUntil: "load"
+        });
+      } catch {}
     }
   }
 }
 
-async function fillForm(page, formElementHandle) {
-  // TODO: smarter strategy
-  /*
-  await page.evaluate(formElement => {
-    const fieldElements = formElement.querySelectorAll(
-      "input, textarea, select"
-    );
-    // ...
-  }, formElementHandle); */
+async function fillForm(formHandle) {
+  const textInputHandleArray = await formHandle.$$(
+    'input[type="text"][value=""], input[type="search"][value=""]'
+  );
+  for (let textInputHandle of textInputHandleArray) {
+    try {
+      await textInputHandle.type("Lorem ipsum");
+    } catch {}
+  }
+
+  const textareaHandleArray = await formHandle.$$('textarea[value=""]');
+  for (let textareaHandle of textareaHandleArray) {
+    try {
+      await textareaHandle.type("Lorem ipsum dolor sit amet");
+    } catch {}
+  }
+
+  const radioInputHandleArray = await formHandle.$$('input[type="radio"]');
+  for (let radioInputHandle of radioInputHandleArray) {
+    try {
+      await radioInputHandle.click();
+    } catch {}
+  }
+
+  const checkboxInputHandleArray = await formHandle.$$(
+    'input[type="checkbox"]'
+  );
+  for (let checkboxInputHandle of checkboxInputHandleArray) {
+    try {
+      await checkboxInputHandle.click();
+    } catch {}
+  }
+
+  // ...
 }
 
 async function queryMitch(page, requestType, requestData = null) {
