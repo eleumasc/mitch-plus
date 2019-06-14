@@ -30,21 +30,7 @@ function pageLooksFamiliar(crawler, dstPage) {
             link1.visited &&
             dstPage !== link1.dstPage &&
             same.dompath(link.dompath, link1.dompath) &&
-            similarPages(dstPage, link1.dstPage) &&
-            // DEBUG
-            ((console.log(
-              "found familiar page " +
-                dstPage.id +
-                " (" +
-                dstPage.url +
-                "), looks like page " +
-                link1.dstPage.id +
-                " (" +
-                link1.dstPage.url +
-                ")"
-            ) &&
-              true) ||
-              true)
+            similarPages(dstPage, link1.dstPage)
         )
     );
   }
@@ -94,12 +80,24 @@ function getPageByRealLinks(crawler, realLinks, url) {
     newPage.aptLeaf = aptLeaf;
     aptLeaf.info.page = newPage;
     crawler.pages.push(newPage);
-    mergeLinks(
-      crawler,
-      realLinks,
-      newPage,
-      !pageLooksFamiliar(crawler, newPage)
-    );
+
+    const familiarPage = pageLooksFamiliar(crawler, newPage);
+
+    mergeLinks(crawler, realLinks, newPage, !familiarPage);
+
+    // Update stats (1)
+    crawler.stats.graphNodesCount++;
+
+    // Update stats (2)
+    if (!crawler.stats.distinctPageUrls.some(url1 => same.url(url, url1))) {
+      crawler.stats.distinctPageUrls.push(url);
+    }
+
+    // Update stats (3)
+    if (familiarPage) {
+      crawler.stats.familiarPagesCount++;
+    }
+
     return newPage;
   }
   return page;
@@ -231,6 +229,13 @@ function logAndReturnSelectLink(link, ...message) {
 exports.crawl = async function(callback, options) {
   const crawler = {
     options: normalizeOptions(options),
+    stats: {
+      distinctFollowUrls: [],
+      distinctFollowedUrls: [],
+      graphNodesCount: 0,
+      distinctPageUrls: [],
+      familiarPagesCount: 0
+    },
     absPageTree: apt.create(),
     pages: [],
     links: [],
@@ -259,19 +264,8 @@ exports.crawl = async function(callback, options) {
           brokenPathToIndirectLink(crawler);
 
           if (crawler.options.dynamicLinks) {
-            // DEBUG
-            console.log(
-              "[M] update " +
-                crawler.lastLink.id +
-                " (" +
-                crawler.lastLink.dstPage.url +
-                " -> " +
-                page.url +
-                ")"
-            );
-
+            console.log("[M] update");
             crawler.lastLink.dstPage = page;
-            console.log("[M] updated");
           } else {
             crawler.lastLink.visitable = false;
             resetLast(crawler);
@@ -301,31 +295,6 @@ exports.crawl = async function(callback, options) {
           );
 
         if (!link) {
-          // DEBUG
-          /*
-          console.log(
-            util.inspect(
-              crawler.pages.map(page => ({
-                id: page.id,
-                url: page.url,
-                dist: page.dist,
-                prev: page.prev && page.prev.id,
-                prevLink: page.prevLink && page.prevLink.id,
-                links: page.links.map(link => ({
-                  id: link.id,
-                  url: link.url,
-                  dstPage: link.dstPage && link.dstPage.id,
-                  visitable: link.visitable,
-                  visited: link.visited,
-                  visitCount: link.visitCount,
-                  gucd1: link.giveUpCountDown1,
-                  gucd2: link.giveUpCountDown2
-                }))
-              })),
-              { depth: 1000, showHidden: false }
-            )
-          ); */
-
           console.log("[M] no link found");
           console.log("[M] go home 2");
           await callback({ request: "home" });
@@ -358,10 +327,26 @@ exports.crawl = async function(callback, options) {
           link: realLink
         });
 
+        // Update stats
+        if (
+          !crawler.stats.distinctFollowUrls.some(url => same.url(link.url, url))
+        ) {
+          crawler.stats.distinctFollowUrls.push(link.url);
+        }
+
         if (cbResult.reply === "done") {
           console.log("[A] followed " + link.url);
           setLast(crawler, page, link);
           done = true;
+
+          // Update stats
+          if (
+            !crawler.stats.distinctFollowedUrls.some(url =>
+              same.url(link.url, url)
+            )
+          ) {
+            crawler.stats.distinctFollowedUrls.push(link.url);
+          }
         } else if (cbResult.reply === "skip") {
           console.log("[A] skip " + link.url);
           brokenPathToIndirectLink(crawler);
@@ -376,36 +361,11 @@ exports.crawl = async function(callback, options) {
       } while (!done);
     } while (crawler.links.some(link => linkIsUnvisited(link)));
   } catch (err) {
-    if (err.name === "TerminateRequest") {
-      // DEBUG
-      /*
-      console.log(
-        util.inspect(
-          crawler.absPageTree.children.map(dpc => {
-            return {
-              dpc: dpc.info.dompathCollection,
-              urls: getUrlsAtLeaves(dpc)
-            };
-
-            function getUrlsAtLeaves(u) {
-              if (u.children.length > 0) {
-                const result = u.children.map(v => getUrlsAtLeaves(v));
-                if (result.length > 0) {
-                  const [first, ...rest] = result;
-                  return first.concat(...rest);
-                } else {
-                  return [];
-                }
-              } else {
-                return [u.info.page.url];
-              }
-            }
-          }),
-          { depth: 1000, showHidden: false }
-        )
-      ); */
-    } else {
+    if (err.name !== "TerminateRequest") {
       throw err;
     }
   }
+
+  // Publish stats
+  await callback({ request: "set-stats", stats: crawler.stats });
 };

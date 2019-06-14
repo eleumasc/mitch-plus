@@ -94,7 +94,7 @@ const config = {
     {
       sourceDir: process.env.MITCH_EXT,
       firefox: pptrFirefox.executablePath(),
-      args: [`-juggler=${CDPPort}` /* "-headless" */] // TODO: enable headless mode
+      args: [`-juggler=${CDPPort}`, "-headless"]
     },
     {
       // These are non CLI related options for each function.
@@ -185,14 +185,24 @@ async function navigate(page, site) {
     await dialog.accept("Lorem ipsum");
   });
 
+  let httpStatusCodeCountStats = {};
   page.on("requestfinished", req => {
     if (req.isNavigationRequest()) {
       console.log("[S] " + req.response().status() + " " + req.url());
     }
+
+    // Update stats
+    if (
+      typeof httpStatusCodeCountStats[req.response().status()] === "undefined"
+    ) {
+      httpStatusCodeCountStats[req.response().status()] = 0;
+    }
+    httpStatusCodeCountStats[req.response().status()]++;
   });
 
+  let crawlStats;
   let linkArray, linkHandleArray;
-  return crawler.crawl(
+  await crawler.crawl(
     async req => {
       if (req.request === "page") {
         let attempts = 3;
@@ -237,12 +247,22 @@ async function navigate(page, site) {
       } else if (req.request === "home") {
         await page.goto(site.navigation.homePageUrl);
         return { reply: "done" };
-      } else {
-        throw new Error("Protocol error");
+      } else if (req.request === "set-stats") {
+        crawlStats = req.stats;
+        return { reply: "done" };
       }
     },
     { dynamicLinks: true }
   );
+
+  console.log({
+    distinctFollowUrlsCount: crawlStats.distinctFollowUrls.length,
+    distinctFollowedUrlsCount: crawlStats.distinctFollowedUrls.length,
+    graphNodesCount: crawlStats.graphNodesCount,
+    distinctPageUrlsCount: crawlStats.distinctPageUrls.length,
+    familiarPagesCount: crawlStats.familiarPagesCount,
+    httpStatusCodeCount: httpStatusCodeCountStats
+  });
 }
 
 async function findLinksInPage(page) {
