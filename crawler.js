@@ -2,6 +2,7 @@
 
 const apt = require("./apt");
 const same = require("./same");
+const util = require("util");
 
 function similarPages(page1, page2) {
   let lastNode1 = page1.aptLeaf;
@@ -29,11 +30,27 @@ function pageLooksFamiliar(crawler, dstPage) {
             link1.visited &&
             dstPage !== link1.dstPage &&
             same.dompath(link.dompath, link1.dompath) &&
-            similarPages(dstPage, link1.dstPage)
+            similarPages(dstPage, link1.dstPage) &&
+            // DEBUG
+            ((console.log(
+              "found familiar page " +
+                dstPage.id +
+                " (" +
+                dstPage.url +
+                "), looks like page " +
+                link1.dstPage.id +
+                " (" +
+                link1.dstPage.url +
+                ")"
+            ) &&
+              true) ||
+              true)
         )
     );
   }
 }
+
+let lastLinkNumber = 0;
 
 function mergeLinks(crawler, realLinks, page, addNew = true) {
   for (let realLink of realLinks) {
@@ -42,10 +59,13 @@ function mergeLinks(crawler, realLinks, page, addNew = true) {
       if (addNew) {
         const newLink = {
           ...realLink,
+          id: "link-" + lastLinkNumber++,
           dstPage: null,
           visitable: true,
           visited: false,
-          visitCount: 0
+          visitCount: 0,
+          giveUpCountDown1: 50,
+          giveUpCountDown2: 5
         };
         crawler.links.push(newLink);
         page.links.push(newLink);
@@ -56,13 +76,17 @@ function mergeLinks(crawler, realLinks, page, addNew = true) {
   }
 }
 
-function getPageByRealLinks(crawler, realLinks) {
+let lastPageNumber = 0;
+
+function getPageByRealLinks(crawler, realLinks, url) {
   const aptLeaf = apt.grow(crawler.absPageTree, realLinks);
   const page = aptLeaf.info.page;
   if (!page) {
     const newPage = {
+      id: "page-" + lastPageNumber++,
       aptLeaf: null,
       links: [],
+      url: url,
       dist: Infinity,
       prev: null,
       prevLink: null
@@ -93,6 +117,13 @@ function findDirectLink(crawler, page) {
   return page.links.find(
     link => linkIsUnvisited(link) && !linkIsSkipped(crawler, link)
   );
+}
+
+function skippedDirectLink(crawler, link) {
+  if (--link.giveUpCountDown1 < 1) {
+    link.visitable = false;
+  }
+  crawler.skipLinks.push(link);
 }
 
 function findPathToIndirectLink(crawler, srcPage) {
@@ -143,6 +174,10 @@ function findPathToIndirectLink(crawler, srcPage) {
 
   if (!dstPage) return null;
 
+  crawler.pathToIndirectLink.unshift(
+    dstPage.links.find(link => linkIsUnvisited(link))
+  );
+
   let page = dstPage,
     prevPage = dstPage.prev;
 
@@ -153,6 +188,26 @@ function findPathToIndirectLink(crawler, srcPage) {
   }
 
   return crawler.pathToIndirectLink.shift();
+}
+
+function brokenPathToIndirectLink(crawler) {
+  if (crawler.pathToIndirectLink.length > 0) {
+    const dstLink = crawler.pathToIndirectLink.splice(-1)[0];
+    if (--dstLink.giveUpCountDown2 < 1) {
+      dstLink.visitable = false;
+    }
+  }
+  crawler.pathToIndirectLink.splice(0);
+}
+
+function setLast(crawler, page, link) {
+  crawler.lastPage = page;
+  crawler.lastLink = link;
+}
+
+function resetLast(crawler) {
+  crawler.lastPage = null;
+  crawler.lastLink = null;
 }
 
 function findRealLink(link, realLinks) {
@@ -168,6 +223,11 @@ function normalizeOptions(options) {
   };
 }
 
+function logAndReturnSelectLink(link, ...message) {
+  if (link) console.log(...message);
+  return link;
+}
+
 exports.crawl = async function(callback, options) {
   const crawler = {
     options: normalizeOptions(options),
@@ -180,108 +240,172 @@ exports.crawl = async function(callback, options) {
     lastLink: null
   };
 
-  do {
-    crawler.skipLinks.splice(0);
+  try {
+    do {
+      crawler.skipLinks.splice(0);
 
-    const realLinks = (await callback({ request: "page" })).links;
-    const page = getPageByRealLinks(crawler, realLinks);
+      let cbResult = await callback({ request: "page" });
+      const realLinks = cbResult.links;
+      const page = getPageByRealLinks(crawler, realLinks, cbResult.url);
 
-    if (!!crawler.lastLink) {
-      crawler.lastLink.visitCount++;
-      if (!crawler.lastLink.dstPage) {
-        crawler.lastLink.dstPage = page;
-        crawler.lastLink.visited = true;
-      } else if (crawler.lastLink.dstPage !== page) {
-        console.log("[M] unexpected navigation");
-        crawler.pathToIndirectLink.splice(0);
-        if (crawler.options.dynamicLinks) {
-          console.log("[M] updated");
+      if (crawler.lastLink) {
+        crawler.lastLink.visitCount++;
+
+        if (!crawler.lastLink.visited) {
           crawler.lastLink.dstPage = page;
-        } else {
-          console.log("[M] go home");
-          await callback({ request: "home" });
-          crawler.lastPage = null;
-          crawler.lastLink.visitable = false;
-          crawler.lastLink = null;
-          continue;
+          crawler.lastLink.visited = true;
+        } else if (crawler.lastLink.dstPage !== page) {
+          console.log("[M] unexpected navigation");
+          brokenPathToIndirectLink(crawler);
+
+          if (crawler.options.dynamicLinks) {
+            // DEBUG
+            console.log(
+              "[M] update " +
+                crawler.lastLink.id +
+                " (" +
+                crawler.lastLink.dstPage.url +
+                " -> " +
+                page.url +
+                ")"
+            );
+
+            crawler.lastLink.dstPage = page;
+            console.log("[M] updated");
+          } else {
+            crawler.lastLink.visitable = false;
+            resetLast(crawler);
+            console.log("[M] go home 1");
+            await callback({ request: "home" });
+            continue;
+          }
         }
       }
+
+      let done = false;
+      do {
+        const link =
+          logAndReturnSelectLink(
+            crawler.pathToIndirectLink.shift(),
+            "[M] next one is a link from path to indirect link (continue)",
+            crawler.pathToIndirectLink.map(link => link.url)
+          ) ||
+          logAndReturnSelectLink(
+            findDirectLink(crawler, page),
+            "[M] next one is a direct link"
+          ) ||
+          logAndReturnSelectLink(
+            findPathToIndirectLink(crawler, page),
+            "[M] next one is a link from path to indirect link",
+            crawler.pathToIndirectLink.map(link => link.url)
+          );
+
+        if (!link) {
+          // DEBUG
+          /*
+          console.log(
+            util.inspect(
+              crawler.pages.map(page => ({
+                id: page.id,
+                url: page.url,
+                dist: page.dist,
+                prev: page.prev && page.prev.id,
+                prevLink: page.prevLink && page.prevLink.id,
+                links: page.links.map(link => ({
+                  id: link.id,
+                  url: link.url,
+                  dstPage: link.dstPage && link.dstPage.id,
+                  visitable: link.visitable,
+                  visited: link.visited,
+                  visitCount: link.visitCount,
+                  gucd1: link.giveUpCountDown1,
+                  gucd2: link.giveUpCountDown2
+                }))
+              })),
+              { depth: 1000, showHidden: false }
+            )
+          ); */
+
+          console.log("[M] no link found");
+          console.log("[M] go home 2");
+          await callback({ request: "home" });
+          brokenPathToIndirectLink(crawler);
+
+          if (!crawler.lastLink) {
+            throw { name: "TerminateRequest" };
+          }
+
+          resetLast(crawler);
+          done = true;
+          continue;
+        }
+
+        const realLink = findRealLink(link, realLinks);
+        if (!realLink) {
+          console.log("[M] broken navigation");
+          console.log("[M] go home 3");
+          await callback({ request: "home" });
+          brokenPathToIndirectLink(crawler);
+          resetLast(crawler);
+          done = true;
+          continue;
+        }
+
+        console.log("[M] follow " + link.url + " " + link.type);
+
+        cbResult = await callback({
+          request: "follow",
+          link: realLink
+        });
+
+        if (cbResult.reply === "done") {
+          console.log("[A] followed " + link.url);
+          setLast(crawler, page, link);
+          done = true;
+        } else if (cbResult.reply === "skip") {
+          console.log("[A] skip " + link.url);
+          brokenPathToIndirectLink(crawler);
+          skippedDirectLink(crawler, link);
+        } else if (cbResult.reply === "mark") {
+          console.log("[A] mark " + link.url);
+          link.visitable = false;
+          brokenPathToIndirectLink(crawler);
+        } else {
+          throw new Error("Protocol error");
+        }
+      } while (!done);
+    } while (crawler.links.some(link => linkIsUnvisited(link)));
+  } catch (err) {
+    if (err.name === "TerminateRequest") {
+      // DEBUG
+      /*
+      console.log(
+        util.inspect(
+          crawler.absPageTree.children.map(dpc => {
+            return {
+              dpc: dpc.info.dompathCollection,
+              urls: getUrlsAtLeaves(dpc)
+            };
+
+            function getUrlsAtLeaves(u) {
+              if (u.children.length > 0) {
+                const result = u.children.map(v => getUrlsAtLeaves(v));
+                if (result.length > 0) {
+                  const [first, ...rest] = result;
+                  return first.concat(...rest);
+                } else {
+                  return [];
+                }
+              } else {
+                return [u.info.page.url];
+              }
+            }
+          }),
+          { depth: 1000, showHidden: false }
+        )
+      ); */
+    } else {
+      throw err;
     }
-
-    function logAndReturnSelectLink(link, ...message) {
-      if (!!link) console.log(...message);
-      return link;
-    }
-
-    let done = false;
-    do {
-      const link =
-        logAndReturnSelectLink(
-          crawler.pathToIndirectLink.shift(),
-          "[M] next one is a link from path to indirect link (continue)"
-        ) ||
-        logAndReturnSelectLink(
-          findDirectLink(crawler, page),
-          "[M] next one is a direct link"
-        ) ||
-        logAndReturnSelectLink(
-          findPathToIndirectLink(crawler, page),
-          "[M] next one is a link from path to indirect link",
-          crawler.pathToIndirectLink.map(link => link.url)
-        );
-
-      if (!link) {
-        console.log("[M] no link found");
-        console.log("[M] go home");
-
-        await callback({ request: "home" });
-        crawler.pathToIndirectLink.splice(0);
-        crawler.lastPage = null;
-        crawler.lastLink = null;
-        done = true;
-        continue;
-      }
-
-      const realLink = findRealLink(link, realLinks);
-      if (!realLink) {
-        console.log("[M] broken navigation");
-        console.log("[M] go home");
-
-        await callback({ request: "home" });
-        crawler.pathToIndirectLink.splice(0);
-        crawler.lastPage = null;
-        crawler.lastLink = null;
-        done = true;
-        continue;
-      }
-
-      console.log("[M] follow " + link.url);
-
-      const cbResult = await callback({
-        request: "follow",
-        link: realLink
-      });
-
-      if (cbResult.reply === "done") {
-        console.log("[A] followed " + link.url);
-        crawler.lastPage = page;
-        crawler.lastLink = link;
-        done = true;
-      } else if (cbResult.reply === "skip") {
-        console.log("[A] skip " + link.url);
-        crawler.pathToIndirectLink.splice(0);
-        crawler.skipLinks.push(link);
-      } else if (cbResult.reply === "mark") {
-        console.log("[A] mark " + link.url);
-        link.visitable = false;
-        crawler.pathToIndirectLink.splice(0);
-      } else if (cbResult.reply === "terminate") {
-        console.log("[A] terminate");
-        console.log("[M] goodbye");
-        return;
-      } else {
-        throw new Error("Protocol error");
-      }
-    } while (!done);
-  } while (crawler.links.some(link => linkIsUnvisited(link)));
+  }
 };

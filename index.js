@@ -62,6 +62,11 @@ const config = {
         },
         logout: async page => {
           await page.goto("http://172.18.0.1:8080/login/logout.php");
+          const logoutButton = await page.$("single_button5d01fcf3d72bd14");
+          await logoutButton.click();
+          try {
+            await page.waitForNavigation({ timeout: 7500, waitUntil: "load" });
+          } catch {}
         },
         profiles: {
           alice: {
@@ -77,39 +82,6 @@ const config = {
       navigation: {
         homePageUrl: "http://172.18.0.1:8080/my/",
         includeDomains: [],
-        excludeUrls: []
-      }
-    },
-    {
-      baseUrl: "http://172.18.0.1:8080/",
-      auth: {
-        login: async (page, profile) => {
-          await page.goto("http://172.18.0.1:8080/index.php?action=login");
-          await page.type('#frmLogin input[name="user"]', profile.userid);
-          await page.type('#frmLogin input[name="passwrd"]', profile.password);
-          await page.click('#frmLogin input[type="submit"]');
-          try {
-            await page.waitForNavigation({ timeout: 7500, waitUntil: "load" });
-          } catch {}
-        },
-        logout: async page => {
-          await page.goto("http://172.18.0.1:8080/index.php");
-          await page.click("#button_logout a");
-        },
-        profiles: {
-          alice: {
-            userid: "alice",
-            password: "Passw0rd*"
-          },
-          bob: {
-            userid: "bob",
-            password: "Passw0rd*"
-          }
-        }
-      },
-      navigation: {
-        homePageUrl: "http://172.18.0.1:8080/index.php",
-        includeDomains: [],
         excludeUrls: [url => url.indexOf("logout") !== -1]
       }
     }
@@ -122,7 +94,7 @@ const config = {
     {
       sourceDir: process.env.MITCH_EXT,
       firefox: pptrFirefox.executablePath(),
-      args: [`-juggler=${CDPPort}` /* "-headless" */] // FIXME: headless mode has been disabled because some links does not trigger a navigation (therefore the user intervention is required)
+      args: [`-juggler=${CDPPort}` /* "-headless" */] // TODO: enable headless mode
     },
     {
       // These are non CLI related options for each function.
@@ -140,9 +112,9 @@ const config = {
   await page.setUserAgent(
     "Mozilla/5.0 (X11; Linux i586; rv:63.0) Gecko/20100101 Firefox/63.0"
   );
-  await page.setViewport({ width: 1024, height: 768 });
+  // await page.setViewport({ width: 1024, height: 768 });
 
-  const site = config.sites[2];
+  const site = config.sites[0];
 
   await page.goto(site.baseUrl);
 
@@ -198,7 +170,6 @@ const config = {
   /* */
 
   await site.auth.login(page, site.auth.profiles.alice);
-  console.log("logged in");
   await navigate(page, site);
   await site.auth.logout(page);
 
@@ -206,56 +177,72 @@ const config = {
 })();
 
 async function navigate(page, site) {
-  let linkArray, linkHandleArray;
-  return crawler.crawl(async req => {
-    if (req.request === "page") {
-      let attempts = 3;
-      while (attempts-- > 0) {
-        try {
-          [linkArray, linkHandleArray] = await filterLinks(
-            await findLinksInPage(page),
-            linkIsAllowed,
-            {
-              site: async () => site,
-              location: async () =>
-                await page.evaluate(() => window.location.href)
-            }
-          );
+  page.on("popup", async popup => {
+    await popup.close();
+  });
 
-          return { reply: "page", links: linkArray };
-        } catch {}
-      }
-      return { reply: "terminate" };
-    } else if (req.request === "follow") {
-      try {
-        await visitLinkInPage(
-          page,
-          req.link,
-          linkHandleArray[linkArray.indexOf(req.link)]
-        );
-        return { reply: "done" };
-      } catch (err) {
-        console.error("[E]", err);
-        if (
-          err.message ===
-          "Protocol error (Runtime.callFunction): Session closed. Most likely the page has been closed."
-        ) {
-          return { reply: "terminate" };
-        } else if (err.name === "LinkNotVisitableError") {
-          return { reply: "skip" };
-        } else if (err.name === "FormNotFillableError") {
-          return { reply: "mark" };
-        } else {
-          throw err;
-        }
-      }
-    } else if (req.request === "home") {
-      await page.goto(site.navigation.homePageUrl);
-      return { reply: "done" };
-    } else {
-      throw new Error("Protocol error");
+  page.on("dialog", async dialog => {
+    await dialog.accept("Lorem ipsum");
+  });
+
+  page.on("requestfinished", req => {
+    if (req.isNavigationRequest()) {
+      console.log("[S] " + req.response().status() + " " + req.url());
     }
   });
+
+  let linkArray, linkHandleArray;
+  return crawler.crawl(
+    async req => {
+      if (req.request === "page") {
+        let attempts = 3;
+        while (attempts-- > 0) {
+          try {
+            [linkArray, linkHandleArray] = await filterLinks(
+              await findLinksInPage(page),
+              linkIsAllowed,
+              {
+                site: async () => site,
+                location: async () => await page.url()
+              }
+            );
+
+            return { reply: "page", links: linkArray, url: await page.url() };
+          } catch {}
+        }
+        throw { name: "TerminateRequest" };
+      } else if (req.request === "follow") {
+        try {
+          await visitLinkInPage(
+            page,
+            req.link,
+            linkHandleArray[linkArray.indexOf(req.link)]
+          );
+          return { reply: "done" };
+        } catch (err) {
+          console.log("[E]", err);
+          if (
+            typeof err.message === "string" &&
+            err.message.startsWith("Protocol error")
+          ) {
+            throw { name: "TerminateRequest" };
+          } else if (err.name === "LinkNotVisitableError") {
+            return { reply: "skip" };
+          } else if (err.name === "FormNotFillableError") {
+            return { reply: "mark" };
+          } else {
+            throw err;
+          }
+        }
+      } else if (req.request === "home") {
+        await page.goto(site.navigation.homePageUrl);
+        return { reply: "done" };
+      } else {
+        throw new Error("Protocol error");
+      }
+    },
+    { dynamicLinks: true }
+  );
 }
 
 async function findLinksInPage(page) {
@@ -349,17 +336,25 @@ async function filterLinks([linkArray, linkHandleArray], filterFn, argsFns) {
 }
 
 async function visitLinkInPage(page, link, linkHandle) {
-  const linkType = await page.evaluate(linkEl => linkEl.tagName, linkHandle);
+  if (link.type === "FORM") {
+    await fillForm(page, linkHandle);
 
-  if (linkType === "FORM") {
-    await fillForm(linkHandle);
+    const formValid = await page.evaluate(
+      formEl => formEl.checkValidity(),
+      linkHandle
+    );
+    if (!formValid) {
+      throw { name: "FormNotFillableError" };
+    }
 
     try {
-      await page.evaluate(formEl => {
-        formEl.submit();
-      }, linkHandle);
+      const submitButton = await linkHandle.$(
+        'input[type="submit"], button[type="submit"]'
+      );
+      await submitButton.focus();
+      await submitButton.type("\n");
     } catch (err) {
-      throw { name: "LinkNotVisitableError" };
+      throw { name: "LinkNotVisitableError", message: err.message };
     }
     try {
       await page.waitForNavigation({
@@ -372,44 +367,63 @@ async function visitLinkInPage(page, link, linkHandle) {
       same.url(await page.url(), link.url) && link.url.indexOf("#") !== -1;
 
     try {
-      await linkHandle.click();
+      linkHandle.focus();
+      linkHandle.type("\n");
+
+      if (!linkWithoutNavigation) {
+        try {
+          await page.waitForNavigation({
+            timeout: 7500,
+            waitUntil: "load"
+          });
+        } catch {}
+      } else {
+        try {
+          await page.waitForNavigation({
+            timeout: 2000,
+            waitUntil: "load"
+          });
+        } catch {}
+      }
     } catch (err) {
       throw { name: "LinkNotVisitableError", message: err.message };
-    }
-
-    if (!linkWithoutNavigation) {
-      try {
-        await page.waitForNavigation({
-          timeout: 7500,
-          waitUntil: "load"
-        });
-      } catch {}
     }
   }
 }
 
-async function fillForm(formHandle) {
+async function fillForm(page, formHandle) {
+  // I don't manage file uploads at the moment...
+  if ((await formHandle.$$('input[type="file"]')).length > 0) {
+    throw { name: "FormNotFillableError" };
+  }
+
   const textInputHandleArray = await formHandle.$$(
-    'input[type="text"][value=""], input[type="search"][value=""]'
+    'input[type="text"], input[type="search"]'
   );
   for (let textInputHandle of textInputHandleArray) {
     try {
       await textInputHandle.type("Lorem ipsum");
-    } catch {}
+    } catch (err) {
+      throw { name: "FormNotFillableError", message: err.message };
+    }
   }
 
-  const textareaHandleArray = await formHandle.$$('textarea[value=""]');
+  const textareaHandleArray = await formHandle.$$("textarea");
   for (let textareaHandle of textareaHandleArray) {
     try {
       await textareaHandle.type("Lorem ipsum dolor sit amet");
-    } catch {}
+    } catch (err) {
+      throw { name: "FormNotFillableError", message: err.message };
+    }
   }
 
   const radioInputHandleArray = await formHandle.$$('input[type="radio"]');
   for (let radioInputHandle of radioInputHandleArray) {
     try {
       await radioInputHandle.click();
-    } catch {}
+    } catch (err) {
+      throw { name: "FormNotFillableError", message: err.message };
+    }
   }
 
   const checkboxInputHandleArray = await formHandle.$$(
@@ -418,7 +432,9 @@ async function fillForm(formHandle) {
   for (let checkboxInputHandle of checkboxInputHandleArray) {
     try {
       await checkboxInputHandle.click();
-    } catch {}
+    } catch (err) {
+      throw { name: "FormNotFillableError", message: err.message };
+    }
   }
 
   // ...
