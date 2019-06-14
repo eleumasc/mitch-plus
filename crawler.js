@@ -331,7 +331,7 @@ exports.crawl = async function(callback, options) {
           await callback({ request: "home" });
           brokenPathToIndirectLink(crawler);
 
-          if (!crawler.lastLink) {
+          if (!crawler.lastPage) {
             throw { name: "TerminateRequest" };
           }
 
